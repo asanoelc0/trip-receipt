@@ -21,6 +21,11 @@
   - iPhone: 共有メニューの「"ファイル"に保存」で iCloud Drive などの場所を選択
   - Android など: ダウンロードフォルダに保存
   - データを文字としてコピー / 貼り付けすることも可能
+- クラウド同期 (Firebase): 画面上部の「クラウド」からログイン (Google またはメールアドレス)
+  - 開いている旅行が Firestore に自動で保存され、スマホとパソコンなど自分の別の端末でも同じデータを開ける
+  - 別の端末での変更はすぐ反映される。オフライン中の変更は、つながったときに送られる
+  - 両方の端末で同じ旅行を変更した場合は、あとから変更したほうが残る
+  - 「クラウドの旅行」一覧から別の旅行を開いたり、クラウドから削除したりできる
 
 ## 使い方
 
@@ -33,3 +38,15 @@ GitHub Pages (main への push で `.github/workflows/pages.yml` が自動公開
 python3 -m http.server 8000
 # http://localhost:8000 を開く
 ```
+
+## Firebase の設定 (最初に1回)
+
+Firebase コンソール (プロジェクト `trip-app-7d4dd`) で次を設定します。
+
+1. **Authentication → ログイン方法**: 「Google」と「メール / パスワード」を有効にする
+2. **Authentication → 設定 → 承認済みドメイン**: `asanoelc0.github.io` を追加する
+   (`localhost` は最初から入っています)
+3. **Firestore Database**: データベースを作成し、**ルール** タブに [`firestore.rules`](firestore.rules) の内容を貼り付けて公開する。
+   ログインした本人だけが自分のデータ (`users/{uid}/trips/{tripId}`) を読み書きできます
+
+`index.html` にある `firebaseConfig` (apiKey など) は公開されても問題ない値で、データはこのルールで守られます。
