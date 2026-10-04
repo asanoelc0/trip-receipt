@@ -99,6 +99,13 @@ button, input, select, textarea { font: inherit; color: inherit; }
 .quicksave svg { width: 18px; height: 18px; }
 .quicksave.attn { background: var(--head-ink); color: var(--head-bg); border-color: var(--head-ink); }
 .quicksave:disabled { opacity: .4; cursor: not-allowed; }
+#cloudBtn { padding: 7px 10px; font-size: 12px; }
+@media (max-width: 420px) { .quicksave span { display: none; } .quicksave { padding: 7px 10px; } #cloudBtn span { display: inline; } }
+#cloudBtn.err { background: var(--warn-bg); color: var(--warn-ink); border-color: var(--warn-bg); }
+.trip-row { display: flex; align-items: center; gap: 8px; padding: 6px 0; border-top: 1px solid var(--line); }
+.trip-row:first-child { border-top: 0; }
+.trip-row .btn { flex: 1; min-width: 0; text-align: left; display: flex; flex-direction: column; gap: 1px; }
+.trip-row .btn .sub { font-size: 12px; color: var(--muted); font-weight: 400; }
 .filebar svg { width: 18px; height: 18px; flex: none; }
 .filebar .fname { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 13px; font-weight: 700; }
 .pill { flex: none; font-size: 11px; font-weight: 700; padding: 2px 8px; border-radius: 999px; white-space: nowrap; }
@@ -321,6 +328,10 @@ textarea.input { font-family: var(--font-num); font-size: 12px; min-height: 120p
       <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M5 3h11l3 3v13a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2z"/><path d="M8 3v5h7V3M8 21v-7h8v7"/></svg>
       <span>保存</span>
     </button>
+    <button class="quicksave" type="button" id="cloudBtn">
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M7 18a4.5 4.5 0 0 1-.6-8.96A6 6 0 0 1 18 10.5a3.75 3.75 0 0 1-.5 7.5z"/></svg>
+      <span id="cloudLabel">…</span>
+    </button>
     </div>
   </header>
 <input type="file" id="fileInput" accept=".json,application/json" hidden>
@@ -387,7 +398,7 @@ function sampleState() {
   const a = uid(), b = uid(), c = uid();
   return {
     sample: true,
-    trip: { name: 'ハワイ旅行 (サンプル)', startDate: '2026-10-10', base: 'JPY' },
+    trip: { id: uid(), name: 'ハワイ旅行 (サンプル)', startDate: '2026-10-10', base: 'JPY' },
     members: [{ id: a, name: 'たろう' }, { id: b, name: 'はなこ' }, { id: c, name: 'けんじ' }],
     currencies: ['JPY', 'USD'],
     rates: { USD: 148.5 },
@@ -405,7 +416,7 @@ function sampleState() {
 function emptyState() {
   return {
     sample: false,
-    trip: { name: '新しい旅行', startDate: new Date().toISOString().slice(0, 10), base: 'JPY' },
+    trip: { id: uid(), name: '新しい旅行', startDate: new Date().toISOString().slice(0, 10), base: 'JPY' },
     members: [{ id: uid(), name: '自分' }],
     currencies: ['JPY'],
     rates: {},
@@ -427,6 +438,8 @@ function load() {
 }
 
 function normalize(s) {
+  // The trip id names the trip's cloud document; older data has none.
+  if (!/^[A-Za-z0-9_-]{1,64}$/.test(s.trip.id || '')) s.trip.id = uid();
   s.members = s.members || [];
   s.currencies = s.currencies || [s.trip.base];
   if (!s.currencies.includes(s.trip.base)) s.currencies.unshift(s.trip.base);
@@ -441,6 +454,7 @@ function save(opts) {
   try { localStorage.setItem(STORAGE_KEY, JSON.stringify(state)); storageOk = true; }
   catch (e) { if (storageOk) toast('この端末に保存できませんでした (プライベートモード?)'); storageOk = false; }
   if (!(opts && opts.clean)) fileChanged();
+  cloudOnSave(opts);
 }
 
 let state = load();
@@ -502,7 +516,7 @@ function fmtTime(iso) {
 
 function fileStatus() {
   if (state.sample) return { cls: 'none', text: 'サンプル', name: 'サンプルデータ (ファイルなし)' };
-  if (!fileMeta.name) return { cls: 'warn', text: '未保存', name: 'ファイルなし' };
+  if (!fileMeta.name) return cloudSynced() ? { cls: 'ok', text: 'クラウド保存', name: 'ファイルなし' } : { cls: 'warn', text: '未保存', name: 'ファイルなし' };
   if (fileMeta.linked && !handleReady) return { cls: 'warn', text: '再接続が必要', name: fileMeta.name };
   if (fileMeta.linked && handleReady) return { cls: fileMeta.dirty ? 'warn' : 'ok', text: fileMeta.dirty ? '書き込み中…' : '自動保存', name: fileMeta.name };
   if (fileMeta.dirty) return { cls: 'warn', text: '変更あり', name: fileMeta.name };
@@ -515,7 +529,7 @@ function renderFileBar() {
   const pill = $('#filePill'); pill.className = 'pill ' + st.cls; pill.textContent = st.text;
   const qs = $('#quickSave');
   qs.disabled = state.sample;
-  qs.classList.toggle('attn', !state.sample && (fileMeta.dirty || !fileMeta.name));
+  qs.classList.toggle('attn', !state.sample && (fileMeta.dirty || !fileMeta.name) && !cloudSynced());
   qs.setAttribute('aria-label', fileMeta.name ? `${fileMeta.name} に上書き保存` : 'ファイルに保存');
   if (fileSheetOpen) renderFileSheet();
 }
@@ -721,11 +735,270 @@ function renderFileSheet() {
 
 /* Opening or starting over while there are unsaved changes asks once inside the sheet. */
 function guarded(act, run) {
-  const unsaved = !state.sample && (fileMeta.dirty || !fileMeta.name) && state.expenses.length > 0 && !(fileMeta.linked && handleReady);
+  const unsaved = !state.sample && (fileMeta.dirty || !fileMeta.name) && state.expenses.length > 0 && !(fileMeta.linked && handleReady) && !cloudSynced();
   const w = $('#fileWarn');
   if (!unsaved || (w && w.dataset.armed === act)) { run(); return; }
   w.hidden = false; w.dataset.armed = act;
   w.innerHTML = `<span>保存していない変更があります。${act === 'file-open' ? '開く' : '新しく始める'}と今のデータは置き換わります。</span><button type="button" data-act="${act}">続ける</button>`;
+}
+
+/* ---------- cloud sync (Firebase) ----------
+   When signed in, the open trip is mirrored to Firestore at users/{uid}/trips/{tripId}
+   so the same data opens on each of the user's devices. localStorage stays the working
+   copy, so the app keeps working offline; the SDK is loaded from the CDN at startup. */
+
+const FB_VER = '12.19.0';
+const firebaseConfig = {
+  apiKey: 'AIzaSyD0Vi-I1ezhBTQG0bMxAKCRZriubULMrHQ',
+  authDomain: 'trip-app-7d4dd.firebaseapp.com',
+  projectId: 'trip-app-7d4dd',
+  storageBucket: 'trip-app-7d4dd.firebasestorage.app',
+  messagingSenderId: '715248963498',
+  appId: '1:715248963498:web:d1f8009e40923bb247e5d3',
+  measurementId: 'G-XFMRHVDQDD',
+};
+
+// status: loading | offline | signedout | sample | syncing | synced | error
+const cloud = { fb: null, user: null, status: 'loading', err: '', tripId: null, unsub: null, timer: null, trips: null };
+let cloudSheetOpen = false;
+
+function cloudSynced() { return cloud.status === 'synced' && !state.sample; }
+
+function hashStr(s) { let h = 5381; for (let i = 0; i < s.length; i++) h = (h * 33 ^ s.charCodeAt(i)) >>> 0; return h.toString(36) + '.' + s.length.toString(36); }
+function stateJson() { const { sample, ...d } = state; return JSON.stringify(d); }
+
+/* Per trip on this device: h = hash of the data last agreed with the cloud, t = time of the last local edit. */
+const syncKey = id => `${STORAGE_KEY}:sync:${id}`;
+function syncInfo(id) { try { return JSON.parse(localStorage.getItem(syncKey(id))) || {}; } catch (e) { return {}; } }
+function setSyncInfo(id, patch) { try { localStorage.setItem(syncKey(id), JSON.stringify({ ...syncInfo(id), ...patch })); } catch (e) {} }
+
+async function loadFirebase() {
+  const url = m => `https://www.gstatic.com/firebasejs/${FB_VER}/firebase-${m}.js`;
+  const [appM, A, F] = await Promise.all([import(url('app')), import(url('auth')), import(url('firestore'))]);
+  const app = appM.initializeApp(firebaseConfig);
+  let db;
+  try { db = F.initializeFirestore(app, { localCache: F.persistentLocalCache({ tabManager: F.persistentMultipleTabManager() }) }); }
+  catch (e) { db = F.getFirestore(app); }
+  import(url('analytics')).then(An => An.isSupported().then(ok => ok && An.getAnalytics(app))).catch(() => {});
+  return { app, auth: A.getAuth(app), db, A, F };
+}
+
+async function initCloud() {
+  setCloud('loading');
+  try { cloud.fb = await loadFirebase(); }
+  catch (e) { setCloud('offline', 'クラウドに接続できません。インターネット接続を確認してください'); return; }
+  const { A, auth } = cloud.fb;
+  A.onAuthStateChanged(auth, user => {
+    cloud.user = user; cloud.trips = null;
+    if (user) listenTrip(); else { stopListen(); setCloud('signedout'); }
+    if (user && cloudSheetOpen) loadCloudTrips();
+    if (view === 'settings') render();
+  });
+}
+
+function setCloud(status, err) {
+  cloud.status = status; cloud.err = err || '';
+  const label = status === 'syncing' && !navigator.onLine ? 'オフライン' :
+    { loading: '…', offline: 'オフライン', signedout: 'ログイン', sample: 'クラウド', syncing: '同期中', synced: '同期済み', error: 'エラー' }[status];
+  const b = $('#cloudBtn');
+  $('#cloudLabel').textContent = label;
+  b.classList.toggle('err', status === 'error');
+  b.setAttribute('aria-label', `クラウド同期: ${label}`);
+  renderFileBar();
+  if (cloudSheetOpen) renderCloudSheet();
+}
+
+function stopListen() { if (cloud.unsub) cloud.unsub(); cloud.unsub = null; cloud.tripId = null; clearTimeout(cloud.timer); }
+
+function tripDoc(id) { const { F, db } = cloud.fb; return F.doc(db, 'users', cloud.user.uid, 'trips', id); }
+
+/* Follow the open trip's document. Whichever side changed since the last agreed version wins;
+   when both did, the later edit wins. */
+function listenTrip() {
+  stopListen();
+  if (!cloud.user) return;
+  if (state.sample) { setCloud('sample'); return; }
+  const id = cloud.tripId = state.trip.id;
+  setCloud('syncing');
+  cloud.unsub = cloud.fb.F.onSnapshot(tripDoc(id), { includeMetadataChanges: true }, snap => {
+    if (id !== state.trip.id || snap.metadata.hasPendingWrites) return;
+    const d = snap.data();
+    if (!d) { if (snap.metadata.fromCache) setCloud('offline'); else pushTrip(); return; }
+    const info = syncInfo(id);
+    const lh = hashStr(stateJson()), rh = hashStr(d.json);
+    if (rh === lh) { setSyncInfo(id, { h: rh }); setCloud(snap.metadata.fromCache ? 'offline' : 'synced'); return; }
+    const localChanged = lh !== info.h, remoteChanged = rh !== info.h;
+    const remoteAt = d.updatedAt ? d.updatedAt.toMillis() : 0;
+    if (localChanged && (!remoteChanged || (info.t || 0) > remoteAt)) pushTrip();
+    else applyRemote(d.json, rh);
+  }, err => setCloud('error', cloudErr(err)));
+}
+
+function pushTrip() {
+  clearTimeout(cloud.timer);
+  if (!cloud.user || state.sample || cloud.tripId !== state.trip.id) return;
+  const { F } = cloud.fb;
+  const id = state.trip.id, json = stateJson(), h = hashStr(json);
+  setSyncInfo(id, { h });
+  setCloud('syncing');
+  F.setDoc(tripDoc(id), { json, name: state.trip.name || '', startDate: state.trip.startDate || '', updatedAt: F.serverTimestamp() })
+    .then(() => {
+      if (id === state.trip.id && hashStr(stateJson()) === h) setCloud('synced');
+      if (cloudSheetOpen && cloud.trips && !cloud.trips.some(t => t.id === id)) loadCloudTrips();
+    })
+    .catch(err => { setSyncInfo(id, { h: null }); setCloud('error', cloudErr(err)); });
+}
+
+function applyRemote(json, rh) {
+  let s;
+  try { s = normalize({ ...JSON.parse(json), sample: false }); }
+  catch (e) { setCloud('error', 'クラウドのデータを読み取れませんでした'); return; }
+  state = s;
+  setSyncInfo(s.trip.id, { h: rh });
+  save({ remote: true });
+  render();
+  setCloud('synced');
+  toast('クラウドの最新データを反映しました');
+}
+
+/* Called from save(): a different trip restarts the listener, an edit is sent after a short pause. */
+function cloudOnSave(opts) {
+  if (!cloud.user) return;
+  if (state.sample) { if (cloud.tripId) { stopListen(); setCloud('sample'); } return; }
+  if (cloud.tripId !== state.trip.id) { listenTrip(); return; }
+  if (opts && opts.remote) return;
+  setSyncInfo(state.trip.id, { t: Date.now() });
+  clearTimeout(cloud.timer);
+  cloud.timer = setTimeout(pushTrip, 800);
+  if (cloud.status !== 'error') setCloud('syncing');
+}
+
+async function signIn(how) {
+  const { A, auth } = cloud.fb;
+  const email = ($('#cloudEmail') || {}).value, pass = ($('#cloudPass') || {}).value;
+  try {
+    if (how === 'google') await A.signInWithPopup(auth, new A.GoogleAuthProvider());
+    else {
+      if (!email || !pass) { setCloud(cloud.status, 'メールアドレスとパスワードを入力してください'); return; }
+      if (how === 'signup') await A.createUserWithEmailAndPassword(auth, email, pass);
+      else await A.signInWithEmailAndPassword(auth, email, pass);
+    }
+    toast('ログインしました');
+  } catch (e) { setCloud(cloud.status, cloudErr(e)); }
+}
+
+function cloudErr(e) {
+  const code = (e && e.code) || '';
+  const msg = {
+    'auth/unauthorized-domain': 'このサイトのドメインが Firebase で許可されていません (Authentication → 設定 → 承認済みドメイン に追加してください)',
+    'auth/operation-not-allowed': 'このログイン方法が Firebase で有効になっていません (Authentication → ログイン方法)',
+    'auth/popup-blocked': 'ポップアップがブロックされました。もう一度押すか、メールアドレスでログインしてください',
+    'auth/popup-closed-by-user': '', 'auth/cancelled-popup-request': '',
+    'auth/invalid-email': 'メールアドレスの形式が正しくありません',
+    'auth/invalid-credential': 'メールアドレスかパスワードが違います',
+    'auth/wrong-password': 'メールアドレスかパスワードが違います',
+    'auth/user-not-found': 'メールアドレスかパスワードが違います',
+    'auth/email-already-in-use': 'このメールアドレスは登録済みです。ログインしてください',
+    'auth/weak-password': 'パスワードは6文字以上にしてください',
+    'auth/network-request-failed': 'ネットワークに接続できません',
+    'auth/too-many-requests': '試行回数が多すぎます。しばらく待ってからやり直してください',
+    'permission-denied': 'Firestore のセキュリティルールで拒否されました (README の手順でルールを設定してください)',
+    'not-found': 'Firestore のデータベースが作成されていません',
+    'failed-precondition': 'Firestore のデータベースが使える状態ではありません',
+  }[code];
+  return msg ?? `エラーが発生しました (${code || (e && e.message) || '不明'})`;
+}
+
+function openCloudSheet() {
+  cloudSheetOpen = true;
+  $('#sheet').style.setProperty('--cat', 'var(--accent)');
+  $('#sheetTitle').textContent = 'クラウド同期';
+  $('#sheetFoot').innerHTML = ''; $('#sheetFoot').hidden = true;
+  renderCloudSheet();
+  showSheet();
+  if (cloud.user && !cloud.trips) loadCloudTrips();
+}
+
+async function loadCloudTrips() {
+  const { F, db } = cloud.fb;
+  try {
+    const qs = await F.getDocs(F.query(F.collection(db, 'users', cloud.user.uid, 'trips'), F.orderBy('updatedAt', 'desc')));
+    cloud.trips = qs.docs.map(d => ({ id: d.id, name: d.get('name'), startDate: d.get('startDate'), at: d.get('updatedAt') }));
+  } catch (e) { cloud.trips = []; cloud.err = cloudErr(e); }
+  if (cloudSheetOpen) renderCloudSheet();
+}
+
+function renderCloudSheet() {
+  const c = cloud;
+  const err = c.err ? `<p class="err" style="margin:10px 0 0">${esc(c.err)}</p>` : '';
+  let h;
+  if (c.status === 'loading') h = '<p class="hint">読み込み中…</p>';
+  else if (!c.fb) h = `<p class="note">クラウドに接続できません。インターネット接続を確認してください。</p>
+    <button class="btn" type="button" data-act="cloud-retry" style="width:100%">再試行</button>`;
+  else if (!c.user) h = `
+    <p class="hint" style="margin:0 0 12px">ログインすると、旅行のデータが Firebase に自動で保存され、スマホとパソコンなど自分の別の端末でも同じデータを開けます。</p>
+    <div class="stack"><button class="btn primary" type="button" data-act="cloud-google">Google でログイン</button></div>
+    <div class="subhead">メールアドレスでログイン</div>
+    <form id="cloudEmailForm">
+      <div class="field"><label for="cloudEmail">メールアドレス</label><input class="input" id="cloudEmail" type="email" autocomplete="username"></div>
+      <div class="field"><label for="cloudPass">パスワード (6文字以上)</label><input class="input" id="cloudPass" type="password" autocomplete="current-password"></div>
+      <div class="row"><button class="btn primary grow" type="submit">ログイン</button><button class="btn grow" type="button" data-act="cloud-signup">新規登録</button></div>
+    </form>${err}`;
+  else {
+    const st = { sample: ['none', 'サンプルは同期しません'], syncing: ['warn', '同期中…'], synced: ['ok', '同期済み'], offline: ['warn', 'オフライン (つながると同期)'], error: ['warn', 'エラー'] }[c.status] || ['none', c.status];
+    const trips = c.trips == null ? '<p class="hint">読み込み中…</p>' : !c.trips.length ? '<p class="hint">まだありません。</p>' :
+      `<div>${c.trips.map(t => {
+        const cur = t.id === state.trip.id && !state.sample;
+        return `<div class="trip-row">
+          <button class="btn" type="button" data-cloud-open="${esc(t.id)}" ${cur ? 'disabled' : ''}><span>${esc(t.name || '旅行')}${cur ? '<span class="tag-ok">表示中</span>' : ''}</span>
+            <span class="sub">${t.startDate ? esc(t.startDate.replace(/-/g, '/')) + ' 出発 · ' : ''}${t.at ? '更新 ' + fmtTime(t.at.toDate().toISOString()) : ''}</span></button>
+          ${cur ? '' : `<button class="iconbtn" type="button" data-cloud-del="${esc(t.id)}" aria-label="${esc(t.name || '旅行')} をクラウドから削除">${svg('<path d="M4 7h16M9 7V4h6v3M6 7l1 13h10l1-13"/>')}</button>`}
+        </div>`; }).join('')}</div>`;
+    h = `
+    <dl class="fileinfo">
+      <dt>アカウント</dt><dd>${esc(c.user.email || c.user.uid)}</dd>
+      <dt>状態</dt><dd><span class="pill ${st[0]}" style="${st[0] === 'none' ? 'background:var(--line)' : ''}">${st[1]}</span></dd>
+    </dl>
+    ${c.status === 'error' ? '<button class="btn primary" type="button" data-act="cloud-retry" style="width:100%">もう一度同期する</button>' : ''}${err}
+    <div class="subhead">クラウドの旅行</div>
+    ${trips}
+    <p class="hint" style="margin:10px 0 0">開いている旅行は変更すると自動でクラウドに保存されます。「新しい旅行」で始めた旅行も自動で追加されます。</p>
+    <button class="btn" type="button" data-act="cloud-signout" style="width:100%;margin-top:14px">ログアウト</button>`;
+  }
+  const keep = ['cloudEmail', 'cloudPass'].map(id => [id, (document.getElementById(id) || {}).value]);
+  $('#sheetBody').innerHTML = h;
+  keep.forEach(([id, v]) => { const i = document.getElementById(id); if (i && v) i.value = v; });
+}
+
+/* Open another cloud trip in place of the current one (which is already in the cloud when synced). */
+async function openCloudTrip(btn) {
+  const id = btn.dataset.cloudOpen;
+  if (!cloudSynced() && !state.sample && state.expenses.length && !btn.dataset.armed) {
+    btn.dataset.armed = '1';
+    btn.querySelector('.sub').textContent = '今の旅行はクラウドに保存されていません。もう一度押すと置き換えて開きます';
+    return;
+  }
+  try {
+    const snap = await cloud.fb.F.getDoc(tripDoc(id));
+    const d = snap.data();
+    if (!d) throw new Error('missing');
+    const s = normalize({ ...JSON.parse(d.json), sample: false });
+    s.trip.id = id;
+    state = s;
+    setSyncInfo(id, { h: hashStr(d.json) });
+    fileHandle = null; handleReady = false; idbSet('handle', undefined).catch(() => {});
+    fileMeta = { name: null, savedAt: null, dirty: false, linked: false }; persistMeta();
+    save({ clean: true });
+    hideSheet(); render();
+    toast(`「${s.trip.name || '旅行'}」を開きました`);
+  } catch (e) { toast('開けませんでした'); }
+}
+
+async function deleteCloudTrip(btn) {
+  const id = btn.dataset.cloudDel;
+  if (!btn.dataset.armed) { btn.dataset.armed = '1'; btn.style.color = 'var(--bad)'; toast('もう一度押すとクラウドから削除します'); return; }
+  try { await cloud.fb.F.deleteDoc(tripDoc(id)); cloud.trips = cloud.trips.filter(t => t.id !== id); renderCloudSheet(); toast('クラウドから削除しました'); }
+  catch (e) { toast(cloudErr(e)); }
 }
 
 /* ---------- money ---------- */
@@ -1030,6 +1303,12 @@ function renderSettings() {
   </div>
 
   <div class="card">
+    <h3>クラウド同期</h3>
+    <p class="note">ログインすると旅行のデータが Firebase に自動で保存され、スマホとパソコンなど自分の別の端末でも同じデータを開けます。</p>
+    <button class="btn" type="button" data-act="cloud-sheet" style="width:100%">${cloud.user ? `クラウド (${esc(cloud.user.email || 'ログイン中')})` : 'ログインして同期する'}</button>
+  </div>
+
+  <div class="card">
     <h3>ファイル</h3>
     <p class="note">旅行のデータは .json ファイルとして好きな場所に保存し、あとから開けます。</p>
     <button class="btn" type="button" data-act="file-sheet" style="width:100%">ファイルの保存・読み込み</button>
@@ -1232,7 +1511,7 @@ function saveExpense() {
 }
 
 function showSheet() { $('#scrim').hidden = false; $('#sheet').hidden = false; document.body.style.overflow = 'hidden'; }
-function hideSheet() { $('#scrim').hidden = true; $('#sheet').hidden = true; $('#sheetFoot').hidden = false; document.body.style.overflow = ''; draft = null; fileSheetOpen = false; }
+function hideSheet() { $('#scrim').hidden = true; $('#sheet').hidden = true; $('#sheetFoot').hidden = false; document.body.style.overflow = ''; draft = null; fileSheetOpen = false; cloudSheetOpen = false; }
 
 function setView(v) {
   view = v;
@@ -1286,6 +1565,9 @@ document.addEventListener('click', ev => {
   if (t.id === 'sheetClose') return hideSheet();
   if (t.id === 'fileBar') return openFileSheet();
   if (t.id === 'quickSave') return saveToFile(false);
+  if (t.id === 'cloudBtn') return openCloudSheet();
+  if (t.dataset.cloudOpen) return openCloudTrip(t);
+  if (t.dataset.cloudDel) return deleteCloudTrip(t);
 
   if (draft) {
     if (t.dataset.pick) {
@@ -1326,6 +1608,11 @@ document.addEventListener('click', ev => {
       state.currencies.push(c); state.sample = false; save(); render(); toast(`${c} を追加しました`); return;
     }
     case 'fetch-rates': fetchRates(); return;
+    case 'cloud-sheet': openCloudSheet(); return;
+    case 'cloud-google': signIn('google'); return;
+    case 'cloud-signup': signIn('signup'); return;
+    case 'cloud-signout': cloud.fb.A.signOut(cloud.fb.auth); return;
+    case 'cloud-retry': if (!cloud.fb) initCloud(); else listenTrip(); return;
     case 'export': {
       const text = fileText();
       const done = () => toast('データをコピーしました');
@@ -1421,6 +1708,7 @@ document.addEventListener('change', ev => {
 });
 
 document.addEventListener('submit', ev => {
+  if (ev.target.id === 'cloudEmailForm') { ev.preventDefault(); signIn('email'); return; }
   if (ev.target.id !== 'addMemForm') return;
   ev.preventDefault();
   const name = $('#newMem').value.trim();
@@ -1438,6 +1726,8 @@ document.addEventListener('keydown', e => {
 
 render();
 restoreHandle();
+initCloud();
+['online', 'offline'].forEach(ev => window.addEventListener(ev, () => setCloud(cloud.status, cloud.err)));
 
 if ('serviceWorker' in navigator && location.protocol === 'https:') {
   navigator.serviceWorker.register('sw.js').catch(() => {});
