@@ -1,5 +1,5 @@
 // Offline cache: serve the app shell from cache, refresh it in the background.
-const CACHE = 'travel-ledger-v2';
+const CACHE = 'travel-ledger-v3';
 const SHELL = ['./', './index.html', './manifest.webmanifest', './icon.svg'];
 
 self.addEventListener('install', e => {

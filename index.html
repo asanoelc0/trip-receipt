@@ -622,8 +622,41 @@ function parseFileData(text) {
   const j = JSON.parse(text);
   const s = j && j.app === 'travel-ledger' ? j.data : j;
   if (!s || !s.trip || !Array.isArray(s.expenses)) throw new Error('format');
+  checkData(s);
   s.sample = false;
   return normalize(s);
+}
+
+/* Data from a file or someone else's share link: ids and currency codes end up in markup,
+   so only well-formed values are accepted and everything else is coerced to its type. */
+const ID_RE = /^[A-Za-z0-9_-]{1,64}$/, CUR_RE = /^[A-Z]{3}$/;
+function checkData(s) {
+  const bad = () => { throw new Error('format'); };
+  const obj = v => v && typeof v === 'object' && !Array.isArray(v);
+  if (!obj(s.trip) || !CUR_RE.test(s.trip.base)) bad();
+  s.trip.name = String(s.trip.name ?? '');
+  s.trip.startDate = /^\d{4}-\d{2}-\d{2}$/.test(s.trip.startDate) ? s.trip.startDate : '';
+  if (s.members != null && !Array.isArray(s.members)) bad();
+  for (const m of s.members || []) { if (!obj(m) || !ID_RE.test(m.id)) bad(); m.name = String(m.name ?? ''); }
+  s.currencies = (Array.isArray(s.currencies) ? s.currencies : []).filter(c => CUR_RE.test(c));
+  const rates = {};
+  if (obj(s.rates)) for (const c in s.rates) { const v = Number(s.rates[c]); if (CUR_RE.test(c) && v > 0) rates[c] = v; }
+  s.rates = rates;
+  s.rateNote = String(s.rateNote ?? '');
+  s.settled = obj(s.settled) ? s.settled : {};
+  for (const e of s.expenses) {
+    if (!obj(e) || !ID_RE.test(e.id) || !CATS.some(c => c.id === e.cat) || !CUR_RE.test(e.currency)) bad();
+    e.amount = Number(e.amount);
+    if (!isFinite(e.amount)) bad();
+    e.name = String(e.name ?? ''); e.note = String(e.note ?? ''); e.payer = String(e.payer ?? '');
+    e.mode = e.mode === 'custom' ? 'custom' : 'equal';
+    e.participants = Array.isArray(e.participants) ? e.participants.filter(id => ID_RE.test(id)) : [];
+    e.shares = obj(e.shares) ? e.shares : {};
+    e.createdAt = Number(e.createdAt) || 0;
+    if (e.order != null) e.order = Number(e.order) || 0;
+    if (e.cancelled) e.cancelFee = Number(e.cancelFee) || 0;
+    if (!s.currencies.includes(e.currency)) s.currencies.push(e.currency);
+  }
 }
 
 function applyOpened(s, name, savedAt, handle) {
@@ -674,7 +707,7 @@ let fileSheetOpen = false;
 function openFileSheet() {
   fileSheetOpen = true;
   $('#sheet').style.setProperty('--cat', 'var(--accent)');
-  $('#sheetTitle').textContent = 'ファイル';
+  $('#sheetTitle').textContent = 'ファイル・共有';
   renderFileSheet();
   showSheet();
 }
@@ -706,6 +739,14 @@ function renderFileSheet() {
     <div id="fileWarn" hidden class="banner" style="margin:10px 0 0"></div>
     <p class="where">${whereText()}</p>
     <p class="hint" style="margin:10px 0 0">入力中のデータはアプリ内にも自動で残るので、次に開いたときは続きから始まります。ファイルは手元に残す控えです。</p>
+    <div class="subhead">メンバーと共有する</div>
+    <div class="stack">
+      <button class="btn primary" type="button" data-act="share-link" ${isSample ? 'disabled' : ''}>共有リンクを送る</button>
+      <button class="btn" type="button" data-act="share-copy" ${isSample ? 'disabled' : ''}>共有リンクをコピー</button>
+      <button class="btn" type="button" data-act="share-file" ${isSample ? 'disabled' : ''}>ファイルを送る</button>
+    </div>
+    <p class="where">リンクに旅行のデータ (メンバー・費用・レート) がすべて入っています。受け取った人がリンクを開くと、その人の端末に読み込まれます。データはサーバーには保存されません。内容を変えたら、もう一度送ってください。</p>
+    <p class="hint" style="margin:10px 0 0">ホーム画面に追加したアプリで読み込むときは、リンクをコピーして下の「データを貼り付け」に貼り付けてください。</p>
     <div class="subhead">文字でやりとりする</div>
     <div class="row">
       <button class="btn grow small" type="button" data-act="export">データをコピー</button>
@@ -717,15 +758,153 @@ function renderFileSheet() {
     </div>`;
   $('#sheetFoot').innerHTML = '';
   $('#sheetFoot').hidden = true;
+  prepareShareUrl().catch(() => {});
+}
+
+function hasUnsaved() {
+  return !state.sample && (fileMeta.dirty || !fileMeta.name) && state.expenses.length > 0 && !(fileMeta.linked && handleReady);
 }
 
 /* Opening or starting over while there are unsaved changes asks once inside the sheet. */
 function guarded(act, run) {
-  const unsaved = !state.sample && (fileMeta.dirty || !fileMeta.name) && state.expenses.length > 0 && !(fileMeta.linked && handleReady);
   const w = $('#fileWarn');
-  if (!unsaved || (w && w.dataset.armed === act)) { run(); return; }
+  if (!hasUnsaved() || (w && w.dataset.armed === act)) { run(); return; }
   w.hidden = false; w.dataset.armed = act;
   w.innerHTML = `<span>保存していない変更があります。${act === 'file-open' ? '開く' : '新しく始める'}と今のデータは置き換わります。</span><button type="button" data-act="${act}">続ける</button>`;
+}
+
+/* ---------- share link ----------
+   The whole trip rides in the link's #fragment (compressed), so there is no server:
+   the fragment never reaches the web host, and whoever opens the link gets their own copy. */
+
+const SHARE_PREFIX = '#share=';
+const SHARE_RE = /#share=([A-Za-z0-9_-]+)/;
+const canZip = typeof CompressionStream === 'function' && typeof DecompressionStream === 'function';
+
+function b64url(bytes) {
+  let s = '';
+  for (let i = 0; i < bytes.length; i += 0x8000) s += String.fromCharCode.apply(null, bytes.subarray(i, i + 0x8000));
+  return btoa(s).replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/, '');
+}
+function unb64url(str) { return Uint8Array.from(atob(str.replace(/-/g, '+').replace(/_/g, '/')), c => c.charCodeAt(0)); }
+async function pipeBytes(bytes, stream) { return new Uint8Array(await new Response(new Blob([bytes]).stream().pipeThrough(stream)).arrayBuffer()); }
+
+/* "z" + deflate when the browser can compress, otherwise "j" + plain JSON. */
+async function encodeShare(json) {
+  const raw = new TextEncoder().encode(json);
+  return canZip ? 'z' + b64url(await pipeBytes(raw, new CompressionStream('deflate'))) : 'j' + b64url(raw);
+}
+async function decodeShare(code) {
+  let bytes = unb64url(code.slice(1));
+  if (code[0] === 'z') {
+    if (!canZip) throw new Error('unsupported');
+    bytes = await pipeBytes(bytes, new DecompressionStream('deflate'));
+  } else if (code[0] !== 'j') throw new Error('format');
+  return parseFileData(new TextDecoder().decode(bytes));
+}
+
+/* The link is built ahead of the tap so the share sheet opens inside the user gesture (Safari). */
+let shareCache = { key: null, url: null };
+async function prepareShareUrl() {
+  if (state.sample) return null;
+  const { sample, ...data } = state;
+  const key = JSON.stringify({ app: 'travel-ledger', version: 1, data });
+  if (shareCache.key === key) return shareCache.url;
+  const url = location.href.split('#')[0] + SHARE_PREFIX + await encodeShare(key);
+  shareCache = { key, url };
+  return url;
+}
+function readyShareUrl() {
+  const { sample, ...data } = state;
+  return shareCache.key === JSON.stringify({ app: 'travel-ledger', version: 1, data }) ? shareCache.url : null;
+}
+
+function copyText(text, msg) {
+  const fallback = () => { $('#importBox').hidden = false; const ta = $('#importText'); ta.value = text; ta.select(); toast('選択された文字をコピーしてください'); };
+  if (navigator.clipboard) navigator.clipboard.writeText(text).then(() => toast(msg), fallback); else fallback();
+}
+
+async function shareLink(copyOnly) {
+  if (state.sample) { toast('サンプルは共有できません。新しい旅行を始めてください'); return; }
+  let url = readyShareUrl();
+  if (!url) {
+    try { url = await prepareShareUrl(); } catch (e) { toast('共有リンクを作れませんでした'); return; }
+  }
+  if (!copyOnly && navigator.share) {
+    try {
+      await navigator.share({ title: state.trip.name, text: `旅費精算帳「${state.trip.name}」のデータです。リンクを開くと読み込めます。`, url });
+      return;
+    } catch (e) { if (e && e.name === 'AbortError') return; }
+  }
+  copyText(url, '共有リンクをコピーしました');
+}
+
+/* The same data as a .json file for apps that take attachments; the receiver uses 「ファイルを開く」. */
+async function shareFile() {
+  if (state.sample) { toast('サンプルは共有できません。新しい旅行を始めてください'); return; }
+  const file = new File([fileText()], suggestedName(), { type: 'application/json' });
+  if (navigator.canShare && navigator.canShare({ files: [file] })) {
+    try { await navigator.share({ files: [file], title: state.trip.name }); }
+    catch (e) { if (!(e && e.name === 'AbortError')) toast('送れませんでした'); }
+    return;
+  }
+  toast('この端末ではファイルを直接送れません。保存したファイルを添付して送ってください');
+}
+
+function clearShareHash() {
+  if (SHARE_RE.test(location.hash)) history.replaceState(null, '', location.pathname + location.search);
+}
+
+let pendingShared = null;
+async function checkShareLink() {
+  const m = location.hash.match(SHARE_RE);
+  if (!m) return;
+  let s;
+  try { s = await decodeShare(m[1]); }
+  catch (e) {
+    clearShareHash();
+    toast(e.message === 'unsupported' ? 'このブラウザでは共有リンクを開けません' : '共有リンクのデータを読み取れませんでした');
+    return;
+  }
+  hideSheet();
+  pendingShared = s;
+  const expN = s.expenses.length;
+  $('#sheet').style.setProperty('--cat', 'var(--accent)');
+  $('#sheetTitle').textContent = '共有されたデータ';
+  $('#sheetBody').innerHTML = `
+    <dl class="fileinfo">
+      <dt>旅行</dt><dd>${esc(s.trip.name || '旅行')}</dd>
+      ${s.trip.startDate ? `<dt>出発</dt><dd class="num">${esc(s.trip.startDate.replace(/-/g, '/'))}</dd>` : ''}
+      <dt>メンバー</dt><dd>${s.members.map(m => esc(m.name)).join('、') || '—'}</dd>
+      <dt>費用</dt><dd>${expN}件</dd>
+    </dl>
+    ${hasUnsaved() ? `<div class="banner" style="margin:0 0 10px"><span>この端末の「${esc(state.trip.name || '旅行')}」に保存していない変更があります。開くと置き換わるので、先にファイルに保存してください。</span></div>` : ''}
+    <p class="hint" style="margin:0">開くと、この端末の今のデータは共有されたデータに置き換わります。</p>`;
+  $('#sheetFoot').hidden = false;
+  $('#sheetFoot').innerHTML = `
+    <button class="btn" type="button" data-act="shared-cancel">やめる</button>
+    <button class="btn primary" type="button" data-act="shared-open">このデータを開く</button>`;
+  showSheet();
+}
+
+function openShared() {
+  const s = pendingShared;
+  if (!s) return;
+  state = s;
+  fileHandle = null; handleReady = false; idbSet('handle', undefined).catch(() => {});
+  fileMeta = { name: null, savedAt: null, dirty: false, linked: false };
+  persistMeta(); save({ clean: true });
+  hideSheet(); render();
+  toast(`「${s.trip.name || '旅行'}」を開きました`);
+}
+
+/* The paste box takes either the copied data or a share link. */
+async function importText(text) {
+  try {
+    const m = text.match(SHARE_RE);
+    state = m ? await decodeShare(m[1]) : parseFileData(text);
+    save(); hideSheet(); render(); toast('読み込みました');
+  } catch (e) { toast('データの形式が正しくありません'); }
 }
 
 /* ---------- money ---------- */
@@ -1030,9 +1209,9 @@ function renderSettings() {
   </div>
 
   <div class="card">
-    <h3>ファイル</h3>
-    <p class="note">旅行のデータは .json ファイルとして好きな場所に保存し、あとから開けます。</p>
-    <button class="btn" type="button" data-act="file-sheet" style="width:100%">ファイルの保存・読み込み</button>
+    <h3>ファイル・共有</h3>
+    <p class="note">旅行のデータは .json ファイルとして好きな場所に保存し、あとから開けます。リンクやファイルでメンバーに共有することもできます。</p>
+    <button class="btn" type="button" data-act="file-sheet" style="width:100%">ファイルの保存・読み込み・共有</button>
   </div>
 
   <div class="card">
@@ -1232,7 +1411,11 @@ function saveExpense() {
 }
 
 function showSheet() { $('#scrim').hidden = false; $('#sheet').hidden = false; document.body.style.overflow = 'hidden'; }
-function hideSheet() { $('#scrim').hidden = true; $('#sheet').hidden = true; $('#sheetFoot').hidden = false; document.body.style.overflow = ''; draft = null; fileSheetOpen = false; }
+function hideSheet() {
+  $('#scrim').hidden = true; $('#sheet').hidden = true; $('#sheetFoot').hidden = false; document.body.style.overflow = '';
+  draft = null; fileSheetOpen = false;
+  if (pendingShared) { pendingShared = null; clearShareHash(); }
+}
 
 function setView(v) {
   view = v;
@@ -1326,20 +1509,14 @@ document.addEventListener('click', ev => {
       state.currencies.push(c); state.sample = false; save(); render(); toast(`${c} を追加しました`); return;
     }
     case 'fetch-rates': fetchRates(); return;
-    case 'export': {
-      const text = fileText();
-      const done = () => toast('データをコピーしました');
-      const fallback = () => { $('#importBox').hidden = false; const ta = $('#importText'); ta.value = text; ta.select(); toast('選択された文字をコピーしてください'); };
-      if (navigator.clipboard) navigator.clipboard.writeText(text).then(done, fallback); else fallback();
-      return;
-    }
+    case 'export': copyText(fileText(), 'データをコピーしました'); return;
     case 'import-open': $('#importBox').hidden = false; $('#importText').value = ''; $('#importText').focus(); return;
-    case 'import':
-      try {
-        const s = parseFileData($('#importText').value);
-        s.sample = false; state = normalize(s); save(); hideSheet(); render(); toast('読み込みました');
-      } catch (e) { toast('データの形式が正しくありません'); }
-      return;
+    case 'import': importText($('#importText').value); return;
+    case 'share-link': shareLink(false); return;
+    case 'share-copy': shareLink(true); return;
+    case 'share-file': shareFile(); return;
+    case 'shared-open': openShared(); return;
+    case 'shared-cancel': hideSheet(); return;
     case 'reset-ask': $('#resetConfirm').hidden = false; t.hidden = true; return;
     case 'reset-cancel': $('#resetConfirm').hidden = true; $('#resetBtn').hidden = false; return;
     case 'reset': startNewTrip(); render(); toast('消去しました'); return;
@@ -1438,6 +1615,8 @@ document.addEventListener('keydown', e => {
 
 render();
 restoreHandle();
+checkShareLink();
+window.addEventListener('hashchange', checkShareLink);
 
 if ('serviceWorker' in navigator && location.protocol === 'https:') {
   navigator.serviceWorker.register('sw.js').catch(() => {});
