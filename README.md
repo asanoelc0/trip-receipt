@@ -1,4 +1,4 @@
-# grand-circle-stop — 旅費精算帳
+# trip-receipt — 旅費精算帳
 
 スマホで使う旅行費用の精算アプリです。ビルド不要の静的ファイル (`index.html`) だけで動きます。
 
