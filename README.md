@@ -24,7 +24,7 @@
 
 ## 使い方
 
-GitHub Pages などの HTTPS で公開し、スマホのブラウザで開いて「ホーム画面に追加」すると
+GitHub Pages (main への push で `.github/workflows/pages.yml` が自動公開: https://asanoelc0.github.io/trip-receipt/ ) などの HTTPS で公開し、スマホのブラウザで開いて「ホーム画面に追加」すると
 アプリのように起動できます (Service Worker によりオフラインでも起動)。
 
 ローカルで試す場合:
